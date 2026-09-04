@@ -7,6 +7,7 @@ Return one read-only Markdown delivery report for a Jira project and report date
 | Field | Type | Default | Description |
 |---|---|---:|---|
 | `projectKey` | `string` | required | Jira project key such as `PROJ` |
+| `epic` | `string[]` | omitted | Optional epic issue keys; when provided, only issues belonging to these epics are included |
 | `date` | `string` | local today | Report date in `yyyy-MM-dd` format |
 | `maxIssues` | `number` | `50` | Maximum issue details retained per search (1-200); Jira totals are retained |
 | `maxBlockers` | `number` | `20` | Maximum candidate issues used for link/risk analysis (1-50) |

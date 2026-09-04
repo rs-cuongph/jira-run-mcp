@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { McpError } from "../errors.js";
 import {
   buildActiveJql,
+  buildBugsThisWeekJql,
   buildDueTodayJql,
   buildOverdueJql,
   buildRecentlyCompletedJql,
@@ -71,6 +72,8 @@ describe("jiraDailySchema", () => {
     expect(jiraDailySchema.safeParse({ projectKey: "PROJ", date: "2026-8-1" }).success).toBe(false);
     expect(jiraDailySchema.safeParse({ projectKey: "PROJ", maxIssues: 201 }).success).toBe(false);
     expect(jiraDailySchema.safeParse({ projectKey: "PROJ", maxBlockers: 0 }).success).toBe(false);
+    expect(jiraDailySchema.safeParse({ projectKey: "PROJ", epic: ["bad"] }).success).toBe(false);
+    expect(jiraDailySchema.safeParse({ projectKey: "PROJ", epic: [] }).success).toBe(false);
   });
 });
 
@@ -81,6 +84,17 @@ describe("daily JQL builders", () => {
     expect(buildDueTodayJql(input)).toBe('project = "PROJ" AND due = "2026-08-18" AND resolution = Unresolved AND statusCategory != Done AND status NOT IN ("Cancel", "Resolved", "Closed")');
     expect(buildOverdueJql(input)).toBe('project = "PROJ" AND due < "2026-08-18" AND resolution = Unresolved AND statusCategory != Done AND status NOT IN ("Cancel", "Resolved", "Closed")');
     expect(buildRecentlyCompletedJql(input)).toBe('project = "PROJ" AND resolved >= "2026-08-12" AND resolved <= "2026-08-18" AND statusCategory = Done');
+    expect(buildBugsThisWeekJql(input)).toBe('project = "PROJ" AND issuetype IN ("Bug", "Bug_Customer", "Leakage") AND created >= "2026-08-17" AND created <= "2026-08-18" AND status NOT IN ("Cancel")');
+  });
+
+  it("scopes every query to multiple epics when provided", () => {
+    const input = { projectKey: "PROJ", epic: ["PROJ-10", "PROJ-20"], date: "2026-08-18", maxIssues: 50, maxBlockers: 20 };
+    const epicClause = ' AND "Epic Link" IN ("PROJ-10", "PROJ-20")';
+    expect(buildActiveJql(input)).toContain(epicClause);
+    expect(buildDueTodayJql(input)).toContain(epicClause);
+    expect(buildOverdueJql(input)).toContain(epicClause);
+    expect(buildRecentlyCompletedJql(input)).toContain(epicClause);
+    expect(buildBugsThisWeekJql(input)).toContain(epicClause);
   });
 });
 
@@ -106,7 +120,6 @@ describe("handleJiraDaily", () => {
     expect(text).toContain("Overdue");
     expect(text).toContain("Blockers & Risks");
     expect(text).toContain("Analysis");
-    expect(text).toContain("jira_get_issue");
     expect(text).toContain("50.0%");
     expect(text).toContain("3 active");
     expect(text).toContain("2 recently completed");

@@ -32,7 +32,7 @@ The report uses four project/date-scoped searches:
 - Active issues: unresolved issues not in the completed status set.
 - Due today: unresolved issues whose due date equals the report date.
 - Overdue: unresolved issues whose due date is before the report date.
-- Recently completed: issues resolved/closed/cancelled in the seven days
+- Recently completed: issues resolved/closed/Cancel in the seven days
   ending on the report date, used as a progress baseline.
 
 Jira result totals are retained for counts even when the returned issue detail

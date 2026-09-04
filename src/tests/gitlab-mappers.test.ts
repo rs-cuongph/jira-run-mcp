@@ -3,6 +3,7 @@ import {
   buildDedupKey,
   buildGitlabNoteUrl,
   extractTopLevelReviewComments,
+  parseJiraIssueKeys,
 } from "../gitlab/mappers.js";
 import type { GitlabRawDiscussion, GitlabRawMergeRequest } from "../types/gitlab-api.js";
 
@@ -11,6 +12,7 @@ const mr: GitlabRawMergeRequest = {
   title: "Fix login",
   web_url: "https://gitlab.example.com/group/app/-/merge_requests/42",
   author: { username: "thanhnn" },
+  description: "Relates to PROJ-2 and https://jira.example.com/browse/PROJ-1",
 };
 
 describe("buildDedupKey", () => {
@@ -33,6 +35,44 @@ describe("buildGitlabNoteUrl", () => {
     ).toBe(
       "https://devops.runsystem.info/dno/du2/microcopy-e-learning-system/-/merge_requests/93#note_1625816"
     );
+  });
+});
+
+describe("parseJiraIssueKeys", () => {
+  const jiraBaseUrl = "https://jira.example.com";
+
+  it("extracts plain Jira issue keys", () => {
+    expect(parseJiraIssueKeys("Fixes PROJ-123 and ABC_1-7", jiraBaseUrl)).toEqual([
+      "PROJ-123",
+      "ABC_1-7",
+    ]);
+  });
+
+  it("extracts full Jira browse URLs from the configured Jira base", () => {
+    expect(
+      parseJiraIssueKeys(
+        "See https://jira.example.com/browse/PROJ-123?focusedCommentId=1#comment-1",
+        jiraBaseUrl
+      )
+    ).toEqual(["PROJ-123"]);
+  });
+
+  it("preserves first appearance order and removes duplicates", () => {
+    expect(
+      parseJiraIssueKeys(
+        "PROJ-2 https://jira.example.com/browse/PROJ-1 PROJ-2 PROJ-1",
+        jiraBaseUrl
+      )
+    ).toEqual(["PROJ-2", "PROJ-1"]);
+  });
+
+  it("ignores invalid keys and URLs from another Jira base", () => {
+    expect(
+      parseJiraIssueKeys(
+        "bad proj-1 ABC- invalid https://other.example.com/browse/PROJ-9 https://jira.example.com/issues/PROJ-8",
+        jiraBaseUrl
+      )
+    ).toEqual([]);
   });
 });
 
@@ -88,6 +128,7 @@ describe("extractTopLevelReviewComments", () => {
     const result = extractTopLevelReviewComments({
       name: "app",
       gitlabBaseUrl: "https://gitlab.example.com",
+      jiraBaseUrl: "https://jira.example.com",
       projectPath: "group/app",
       mr,
       discussions,
@@ -98,6 +139,7 @@ describe("extractTopLevelReviewComments", () => {
     expect(result[0].name).toBe("app");
     expect(result[0].commentAuthorUsername).toBe("reviewer1");
     expect(result[0].mrAuthorUsername).toBe("thanhnn");
+    expect(result[0].jiraIssueKeys).toEqual(["PROJ-2", "PROJ-1"]);
     expect(result[0].dueDate).toBe("2026-07-15");
     expect(result[0].filePath).toBe("src/a.ts");
     expect(result[0].line).toBe(12);
@@ -125,6 +167,7 @@ describe("extractTopLevelReviewComments", () => {
       extractTopLevelReviewComments({
         name: "app",
         gitlabBaseUrl: "https://gitlab.example.com",
+        jiraBaseUrl: "https://jira.example.com",
         projectPath: "group/app",
         mr,
         discussions,

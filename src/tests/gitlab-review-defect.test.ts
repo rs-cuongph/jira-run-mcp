@@ -10,6 +10,7 @@ import {
 import type { GitlabReviewCommentCandidate } from "../gitlab/mappers.js";
 
 const sampleCandidate: GitlabReviewCommentCandidate = {
+  jiraIssueKeys: [],
   dedupKey: "https://gitlab.example.com|group/app|42|10",
   noteId: 10,
   discussionId: "d1",

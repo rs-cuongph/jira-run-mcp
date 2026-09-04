@@ -4,18 +4,20 @@ import { z } from "zod";
 import { loadAndValidateSession } from "../auth/session-manager.js";
 import { isMcpError } from "../errors.js";
 import { JiraHttpClient } from "../jira/http-client.js";
-import { escapeJqlString, mapWithConcurrency, navigationHint, todayLocalDate } from "../utils.js";
+import { escapeJqlString, mapWithConcurrency, todayLocalDate } from "../utils.js";
 import type { Config } from "../config.js";
 import type { JiraIssueLinksResult, JiraIssueSummary } from "../types.js";
 
 dayjs.extend(customParseFormat);
 
 const PROJECT_KEY_PATTERN = /^[A-Z][A-Z0-9_]+$/;
+const ISSUE_KEY_PATTERN = /^[A-Z][A-Z0-9_]+-\d+$/;
 const COMPLETED_STATUS_NAMES = new Set(["cancel", "resolved", "closed"]);
 const SIGNAL_PATTERN = /blocked|blocker|blocking|blocked by|dependency|phụ thuộc|vướng/i;
 
 export const jiraDailySchema = z.object({
   projectKey: z.string().trim().regex(PROJECT_KEY_PATTERN, "projectKey must be a Jira project key, e.g. PROJ"),
+  epic: z.array(z.string().trim().regex(ISSUE_KEY_PATTERN, "epic must contain Jira issue keys, e.g. PROJ-123")).min(1).max(50).optional(),
   date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine((value) => dayjs(value, "YYYY-MM-DD", true).isValid(), "date must be yyyy-MM-dd").default(todayLocalDate()),
   maxIssues: z.number().int().min(1).max(200).default(50),
   maxBlockers: z.number().int().min(1).max(50).default(20),
@@ -24,7 +26,10 @@ export const jiraDailySchema = z.object({
 export type JiraDailyInput = z.infer<typeof jiraDailySchema>;
 
 function baseJql(input: JiraDailyInput): string {
-  return `project = "${escapeJqlString(input.projectKey)}"`;
+  const projectClause = `project = "${escapeJqlString(input.projectKey)}"`;
+  if (!input.epic?.length) return projectClause;
+  const epicKeys = input.epic.map((key) => `"${escapeJqlString(key)}"`).join(", ");
+  return `${projectClause} AND "Epic Link" IN (${epicKeys})`;
 }
 
 const unresolved = `resolution = Unresolved AND statusCategory != Done AND status NOT IN ("Cancel", "Resolved", "Closed")`;
@@ -46,6 +51,12 @@ export function buildRecentlyCompletedJql(input: JiraDailyInput): string {
   return `${baseJql(input)} AND resolved >= "${start}" AND resolved <= "${input.date}" AND statusCategory = Done`;
 }
 
+export function buildBugsThisWeekJql(input: JiraDailyInput): string {
+  const daysFromMonday = (dayjs(input.date).day() + 6) % 7;
+  const start = dayjs(input.date).subtract(daysFromMonday, "day").format("YYYY-MM-DD");
+  return `${baseJql(input)} AND issuetype IN ("Bug", "Bug_Customer", "Leakage") AND created >= "${start}" AND created <= "${input.date}" AND status NOT IN ("Cancel")`;
+}
+
 type ToolResult = { content: Array<{ type: "text"; text: string }>; isError?: boolean };
 type SearchBucket = { total: number; issues: JiraIssueSummary[] };
 
@@ -55,6 +66,7 @@ export interface JiraDailyCollection {
   dueToday: SearchBucket;
   overdue: SearchBucket;
   recentlyCompleted: SearchBucket;
+  bugsThisWeek: SearchBucket;
   details: JiraIssueSummary[];
   blockers: BlockerRow[];
   linkFailures: number;
@@ -66,14 +78,14 @@ export async function collectJiraDaily(rawInput: unknown, cfg: Config): Promise<
   const input = parsed.data;
   const cookies = await loadAndValidateSession(cfg.JIRA_SESSION_FILE, cfg.JIRA_BASE_URL, cfg.JIRA_VALIDATE_PATH);
   const client = new JiraHttpClient(cfg.JIRA_BASE_URL, cookies);
-  const queries = [buildActiveJql(input), buildDueTodayJql(input), buildOverdueJql(input), buildRecentlyCompletedJql(input)];
+  const queries = [buildActiveJql(input), buildDueTodayJql(input), buildOverdueJql(input), buildRecentlyCompletedJql(input), buildBugsThisWeekJql(input)];
   const buckets = await Promise.all(queries.map((jql) => client.searchIssues(jql, input.maxIssues, 0, ["description"])));
-  const [active, dueToday, overdue, recentlyCompleted] = buckets;
+  const [active, dueToday, overdue, recentlyCompleted, bugsThisWeek] = buckets;
   const details = dedupeIssues([...active.issues, ...dueToday.issues, ...overdue.issues, ...recentlyCompleted.issues]);
   const blockerCandidates = dedupeIssues([...active.issues, ...dueToday.issues, ...overdue.issues, ...details.filter(hasTextSignal)]).slice(0, input.maxBlockers);
   const linkResults = await mapWithConcurrency(blockerCandidates, 5, (item) => client.getIssueLinks(item.key));
   const blockers = linkResults.flatMap((result) => result.ok ? classifySignals(result.item, result.value, input.date) : classifySignals(result.item, null, input.date));
-  return { input, active, dueToday, overdue, recentlyCompleted, details, blockers, linkFailures: linkResults.filter((result) => !result.ok).length };
+  return { input, active, dueToday, overdue, recentlyCompleted, bugsThisWeek, details, blockers, linkFailures: linkResults.filter((result) => !result.ok).length };
 }
 
 export async function handleJiraDaily(rawInput: unknown, cfg: Config): Promise<ToolResult> {
@@ -176,7 +188,6 @@ function formatReport(input: JiraDailyInput, buckets: { active: SearchBucket; du
     "## Analysis", "", analysis(buckets, details, input.date),
   ];
   if (linkFailures) lines.push(`_partial analysis: ${linkFailures} issue-link fetch(es) failed; base report retained._`);
-  lines.push(navigationHint("`jira_get_issue({issueKey: \"<key>\"})` for details", "`jira_get_issue_links({issueKey: \"<key>\"})` for dependencies", "`jira_get_issue_history({issueKey: \"<key>\"})` for changes", "`jira_search_issues({jql: \"...\"})` for follow-up", "`jira_find_stale_issues({staleDays: 30})` for stale work"));
   return lines.join("\n");
 }
 

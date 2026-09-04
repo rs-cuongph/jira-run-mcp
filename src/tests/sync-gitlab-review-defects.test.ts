@@ -268,6 +268,7 @@ describe("handleSyncGitlabReviewDefects", () => {
   let mockFindUsers: ReturnType<typeof vi.fn>;
   let mockSearchIssues: ReturnType<typeof vi.fn>;
   let mockCreateIssue: ReturnType<typeof vi.fn>;
+  let mockLinkIssues: ReturnType<typeof vi.fn>;
   let mockListMrs: ReturnType<typeof vi.fn>;
   let mockGetMr: ReturnType<typeof vi.fn>;
   let mockListDiscussions: ReturnType<typeof vi.fn>;
@@ -279,6 +280,7 @@ describe("handleSyncGitlabReviewDefects", () => {
     mockFindUsers = vi.fn();
     mockSearchIssues = vi.fn().mockResolvedValue({ total: 0, issues: [] });
     mockCreateIssue = vi.fn();
+    mockLinkIssues = vi.fn().mockResolvedValue({ linkId: "link-1" });
     mockListMrs = vi.fn();
     mockGetMr = vi.fn();
     mockListDiscussions = vi.fn();
@@ -290,6 +292,7 @@ describe("handleSyncGitlabReviewDefects", () => {
           findUsers: mockFindUsers,
           searchIssues: mockSearchIssues,
           createIssue: mockCreateIssue,
+          linkIssues: mockLinkIssues,
         }) as never
     );
     vi.mocked(GitlabHttpClient).mockImplementation(
@@ -360,6 +363,15 @@ describe("handleSyncGitlabReviewDefects", () => {
   });
 
   it("dryRun lists candidates and does not create", async () => {
+    mockListMrs.mockResolvedValue([
+      {
+        iid: 42,
+        title: "Fix login",
+        web_url: "https://gitlab.example.com/group/app/-/merge_requests/42",
+        author: { username: "thanhnn" },
+        description: "Related to PROJ-9",
+      },
+    ]);
     mockFindUsers.mockImplementation(async (query: string) => [
       {
         name: query,
@@ -384,8 +396,10 @@ describe("handleSyncGitlabReviewDefects", () => {
     expect(result.content[0].text).toContain("create payload");
     expect(result.content[0].text).toContain('"issuetype"');
     expect(result.content[0].text).toContain('[Review Code][app][MR !42]');
+    expect(result.content[0].text).toContain("Jira references: PROJ-9");
     expect(mockListMrs).toHaveBeenCalledWith("group/app", "opened", undefined);
     expect(mockCreateIssue).not.toHaveBeenCalled();
+    expect(mockLinkIssues).not.toHaveBeenCalled();
   });
 
   it("uses cfg GitLab file paths when options are omitted", async () => {
@@ -701,6 +715,7 @@ describe("handleSyncGitlabReviewDefects", () => {
 
     expect(result.content[0].text).toContain("PROJ-100");
     expect(mockCreateIssue).toHaveBeenCalledTimes(1);
+    expect(mockLinkIssues).not.toHaveBeenCalled();
     const payload = mockCreateIssue.mock.calls[0]?.[0] as {
       fields: Record<string, unknown>;
     };
@@ -708,6 +723,92 @@ describe("handleSyncGitlabReviewDefects", () => {
     expect(payload.fields.summary).toBe("[Review Code][app][MR !42] Please fix null check");
     const ids = await loadGitlabReviewDedupStore(dedupFile);
     expect(ids.has("https://gitlab.example.com|group/app|42|10")).toBe(true);
+  });
+
+  it("apply links the created Review Defect to every Jira reference in the MR description", async () => {
+    mockListMrs.mockResolvedValue([
+      {
+        iid: 42,
+        title: "Fix login",
+        web_url: "https://gitlab.example.com/group/app/-/merge_requests/42",
+        author: { username: "thanhnn" },
+        description:
+          "See PROJ-9, https://jira.example.com/browse/ABC-2, and PROJ-9 again.",
+      },
+    ]);
+    mockFindUsers.mockImplementation(async (query: string) => [
+      {
+        name: query,
+        key: query,
+        displayName: query,
+        emailAddress: query,
+        active: true,
+      },
+    ]);
+    mockCreateIssue.mockResolvedValue({
+      id: "1",
+      key: "PROJ-100",
+      url: "https://jira.example.com/browse/PROJ-100",
+    });
+
+    const result = await handleSyncGitlabReviewDefects(
+      { projectKey: "PROJ", dryRun: false, mrState: "opened" },
+      mockConfig,
+      { gitlabProjectsFile: mapFile, gitlabDedupFile: dedupFile }
+    );
+
+    expect(result.content[0].text).toContain("PROJ-100");
+    expect(mockLinkIssues).toHaveBeenCalledTimes(2);
+    expect(mockLinkIssues).toHaveBeenNthCalledWith(1, {
+      type: { name: "Relates" },
+      inwardIssue: { key: "PROJ-100" },
+      outwardIssue: { key: "PROJ-9" },
+    });
+    expect(mockLinkIssues).toHaveBeenNthCalledWith(2, {
+      type: { name: "Relates" },
+      inwardIssue: { key: "PROJ-100" },
+      outwardIssue: { key: "ABC-2" },
+    });
+  });
+
+  it("reports link failures while keeping the created issue and local dedup", async () => {
+    mockListMrs.mockResolvedValue([
+      {
+        iid: 42,
+        title: "Fix login",
+        web_url: "https://gitlab.example.com/group/app/-/merge_requests/42",
+        author: { username: "thanhnn" },
+        description: "PROJ-9",
+      },
+    ]);
+    mockFindUsers.mockImplementation(async (query: string) => [
+      {
+        name: query,
+        key: query,
+        displayName: query,
+        emailAddress: query,
+        active: true,
+      },
+    ]);
+    mockCreateIssue.mockResolvedValue({
+      id: "1",
+      key: "PROJ-100",
+      url: "https://jira.example.com/browse/PROJ-100",
+    });
+    mockLinkIssues.mockRejectedValue(new Error("link failed"));
+
+    const result = await handleSyncGitlabReviewDefects(
+      { projectKey: "PROJ", dryRun: false, mrState: "opened" },
+      mockConfig,
+      { gitlabProjectsFile: mapFile, gitlabDedupFile: dedupFile }
+    );
+
+    expect(result.content[0].text).toContain("Created (1)");
+    expect(result.content[0].text).toContain("Failed (1)");
+    expect(result.content[0].text).toContain("link PROJ-100 -> PROJ-9: link failed");
+    expect(
+      await loadGitlabReviewDedupStore(dedupFile)
+    ).toEqual(new Set(["https://gitlab.example.com|group/app|42|10"]));
   });
 
   it("skips duplicates from local store", async () => {

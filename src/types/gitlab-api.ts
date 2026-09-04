@@ -13,6 +13,7 @@ export interface GitlabRawMergeRequest {
   id?: number;
   iid?: number;
   title?: string;
+  description?: string | null;
   state?: string;
   web_url?: string;
   author?: GitlabRawUser;

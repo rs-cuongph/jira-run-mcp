@@ -5,6 +5,7 @@ import type {
 } from "../types/gitlab-api.js";
 
 export interface GitlabReviewCommentCandidate {
+  jiraIssueKeys: string[];
   dedupKey: string;
   noteId: number;
   discussionId: string;
@@ -48,6 +49,49 @@ export function buildGitlabMrPathFragment(projectPath: string, mrIid: number): s
   return `/${projectPath}/-/merge_requests/${mrIid}`;
 }
 
+const JIRA_ISSUE_KEY_PATTERN = /^[A-Z][A-Z0-9_]+-\d+$/;
+const JIRA_REFERENCE_TOKEN_PATTERN = /https?:\/\/[^\s]+|[A-Z][A-Z0-9_]+-\d+/g;
+
+/** Extract Jira issue keys mentioned in an MR description for one Jira instance. */
+export function parseJiraIssueKeys(
+  description: string | null | undefined,
+  jiraBaseUrl: string
+): string[] {
+  if (!description?.trim()) return [];
+
+  const base = new URL(jiraBaseUrl.replace(/\/+$/, ""));
+  const basePath = base.pathname.replace(/\/+$/, "");
+  const keys: string[] = [];
+  const seen = new Set<string>();
+
+  for (const match of description.matchAll(JIRA_REFERENCE_TOKEN_PATTERN)) {
+    const token = match[0];
+    const key =
+      token.startsWith("http://") || token.startsWith("https://")
+        ? parseJiraBrowseUrl(token, base.origin, basePath)
+        : token;
+    if (key == null || !JIRA_ISSUE_KEY_PATTERN.test(key) || seen.has(key)) continue;
+    seen.add(key);
+    keys.push(key);
+  }
+
+  return keys;
+}
+
+function parseJiraBrowseUrl(token: string, baseOrigin: string, basePath: string): string | null {
+  const cleaned = token.replace(/[),.;!?\]}>]+$/g, "");
+  try {
+    const url = new URL(cleaned);
+    if (url.origin !== baseOrigin) return null;
+    const prefix = `${basePath}/browse/`;
+    if (!url.pathname.startsWith(prefix)) return null;
+    const key = url.pathname.slice(prefix.length);
+    return key.includes("/") ? null : key;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Extract top-level human discussion notes from an MR.
  * Ignores replies (notes after the first) and system notes.
@@ -55,6 +99,7 @@ export function buildGitlabMrPathFragment(projectPath: string, mrIid: number): s
 export function extractTopLevelReviewComments(input: {
   name: string;
   gitlabBaseUrl: string;
+  jiraBaseUrl: string;
   projectPath: string;
   mr: GitlabRawMergeRequest;
   discussions: GitlabRawDiscussion[];
@@ -65,6 +110,7 @@ export function extractTopLevelReviewComments(input: {
   const mrAuthorUsername = input.mr.author?.username?.trim() ?? "";
   const mrTitle = input.mr.title?.trim() ?? "";
   const mrUrl = input.mr.web_url?.trim() ?? "";
+  const jiraIssueKeys = parseJiraIssueKeys(input.mr.description, input.jiraBaseUrl);
   const results: GitlabReviewCommentCandidate[] = [];
 
   for (const discussion of input.discussions) {
@@ -89,6 +135,7 @@ export function extractTopLevelReviewComments(input: {
     const line = top.position?.new_line ?? top.position?.old_line ?? null;
 
     results.push({
+      jiraIssueKeys,
       dedupKey: buildDedupKey(input.gitlabBaseUrl, input.projectPath, mrIid, noteId),
       noteId,
       discussionId: discussion.id ?? String(noteId),
