@@ -38,6 +38,8 @@ Sync top-level review comments from GitLab merge requests into Jira **Review Def
 - **Date range:** explicit historical window; does not read or advance the watermark
 - **`fullSync: true`:** ignores watermark for listing; advances watermark after successful apply
 - Only **top-level** human discussion notes (ignores replies and system notes)
+- Reads Jira references from each MR description. References may be plain issue keys (for example `PROJ-123`) or `/browse/PROJ-123` URLs on the configured Jira base URL. References are kept in first-seen order and duplicates are removed; URLs from another Jira base or invalid keys are ignored.
+- On apply, each created Review Defect is linked to every referenced Jira issue with the `Relates` link type (`relates to` in Jira), from the Review Defect to the referenced issue. Dry-run shows the references that would be linked and does not create issues or links.
 - MR-level safety check: if Jira already has any Review Defect mentioning `/{projectPath}/-/merge_requests/{mrIid}`, the tool skips **all** notes from that MR **before** fetching GitLab discussions (fast path)
 - Performance: GitLab discussion fetches run with bounded concurrency (default 8); Jira dedup searches and issue creates are batched / pooled to avoid N+1 API calls
 - Apply uses the same create-issue validation path as `jira_create_issue` / `jira_preview_create_issue` (`buildCreateIssuePayload` + `createIssueFromFields`)
@@ -50,6 +52,7 @@ Sync top-level review comments from GitLab merge requests into Jira **Review Def
 - Due date = comment created date (`YYYY-MM-DD`)
 - Project Stages (`customfield_10339`) = `CODING` by default; override with `projectStage` (e.g. `BASIC_DESIGN`)
 - Summary format: `[Review Code][<repository name>][MR !<IID>] <comment review>`, truncated to 180 characters
+- If creating a Review Defect succeeds but one of its Jira links fails, the issue remains in **Created**, the note remains recorded in local dedup, and the failed link is listed separately in **Failed** as `link <createdKey> -> <referencedKey>: ...`.
 
 ## Output sections
 

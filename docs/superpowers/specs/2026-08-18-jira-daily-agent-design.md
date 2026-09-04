@@ -51,29 +51,34 @@ that Jira does not support.
 ## Fixed Output Format
 
 ```text
-**Daily brief dự án <projectKey> — <DD/MM/YYYY>**
+## Daily brief <projectKey> · <DD/MM/YYYY>
 
-**Tổng quan: 🟢 / ổn | 🟠 / cần theo dõi | 🔴 / cần xử lý ngay**
+**Tổng quan:** 🟢 / ổn | 🟠 / cần theo dõi | 🔴 / cần xử lý ngay
 
-- N issue đang active
-- N issue đang In Progress
-- N issue đã hoàn thành
-- N issue đến hạn hôm nay
-- N issue quá hạn
-- Weighted progress: **N,N%** | N/A
+| KPI | Giá trị |
+|---|---:|
+| Active | N |
+| In Progress | N |
+| Hoàn thành | N |
+| Đến hạn hôm nay | N |
+| Quá hạn | N |
+| Bug trong tuần | N |
+| Weighted progress | N,N% / N/A |
 
-**Các điểm cần quản lý chú ý**
+### Cần chú ý
 
-- [ISSUE-KEY](url) — <summary>: trạng thái <status>, <signal>; owner <name>|chưa có owner.
+| Issue | Tín hiệu | Trạng thái | Owner |
+|---|---|---|---|
+| [ISSUE-KEY](url) — <summary> | <signal> | <status> | <name> / chưa có owner |
 
-**Việc cần chốt hôm nay**
+### Chốt hôm nay
 
 1. <action only when the matching signal exists>
 
-Báo cáo chỉ đọc, không có thay đổi nào được ghi vào Jira.
+Chỉ đọc; Jira không bị thay đổi.
 ```
 
-The section order and headings are fixed. Issue keys are markdown links.
+The section order and headings are fixed. Issue keys are markdown links. Summary, signal, status, owner, and dependency values are escaped for Markdown table cells (`|` and line breaks).
 The agent may omit empty action items, but it must preserve all headings.
 It must not reproduce the complete Jira issue list when no issue is a concern.
 
@@ -81,6 +86,9 @@ It must not reproduce the complete Jira issue list when no issue is a concern.
 
 - No issues: report the project as `🟢 / ổn` and state that no risk signal was
   found in the current Jira data.
+- `Bug trong tuần` counts issues created from Monday through the report date,
+  limited to issue types `Bug`, `Bug_Customer`, and `Leakage`; status `Cancel`
+  is excluded.
 - Weighted progress with no valid sample: show `N/A`, never `0%`. If the
   computed value is `0,0%`, add a note to re-check estimates.
 - Authentication/search failure: explain that no reliable briefing can be

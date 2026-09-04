@@ -299,6 +299,7 @@ export async function handleSyncGitlabReviewDefects(
       dateTo,
       fullSync,
       jira,
+      jiraBaseUrl: cfg.JIRA_BASE_URL,
       projectKey,
       gitlabDedupFile,
     });
@@ -391,14 +392,29 @@ export async function handleSyncGitlabReviewDefects(
             key: result.key,
             url: result.url,
             dedupKey: item.candidate.dedupKey,
+            jiraIssueKeys: item.candidate.jiraIssueKeys,
           };
         }
       );
 
       for (const result of createResults) {
         if (result.ok) {
-          created.push(result.value);
+          const { key, url, dedupKey, jiraIssueKeys } = result.value;
+          created.push({ key, url, dedupKey });
           newlyCreatedIds.push(result.value.dedupKey);
+          for (const referencedJiraKey of jiraIssueKeys) {
+            try {
+              await withHttpRetry(() =>
+                jira.linkIssues({
+                  type: { name: "Relates" },
+                  inwardIssue: { key },
+                  outwardIssue: { key: referencedJiraKey },
+                })
+              );
+            } catch (err: unknown) {
+              createFailed.push(formatErr(`link ${key} -> ${referencedJiraKey}`, err));
+            }
+          }
         } else {
           const dedupKey =
             result.item.candidate?.dedupKey ?? `index:${result.index}`;
@@ -467,6 +483,7 @@ async function collectReviewComments(input: {
   dateTo?: string;
   fullSync: boolean;
   jira: Pick<JiraHttpClient, "searchIssues">;
+  jiraBaseUrl: string;
   projectKey: string;
   gitlabDedupFile: string;
 }): Promise<{
@@ -561,6 +578,7 @@ async function collectReviewComments(input: {
           return extractTopLevelReviewComments({
             name: link.name,
             gitlabBaseUrl: link.gitlabBaseUrl,
+            jiraBaseUrl: input.jiraBaseUrl,
             projectPath: link.projectPath,
             mr,
             discussions,
@@ -1061,6 +1079,9 @@ function formatCandidateBullet(
     `  - note: ${buildGitlabNoteUrl(c.gitlabBaseUrl, c.projectPath, c.mrIid, c.noteId)}`,
     `  - dedup: \`${c.dedupKey}\``,
   ];
+  if (c.jiraIssueKeys.length > 0) {
+    lines.push(`  - Jira references: ${c.jiraIssueKeys.join(", ")}`);
+  }
   if (includePayload) {
     const fields = buildReviewDefectFields(projectKey, item, projectStage);
     const payload = buildCreateIssuePayload(ISSUE_TYPE.REVIEW_DEFECT, fields);

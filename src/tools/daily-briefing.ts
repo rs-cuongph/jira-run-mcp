@@ -6,10 +6,11 @@ import { isMcpError } from "../errors.js";
 import { JiraHttpClient } from "../jira/http-client.js";
 import type { Config } from "../config.js";
 import type { JiraIssue, JiraIssueSummary } from "../types.js";
-import { navigationHint, todayLocalDate } from "../utils.js";
+import { todayLocalDate } from "../utils.js";
 import { collectJiraDaily, type JiraDailyCollection } from "./daily.js";
 
 const PROJECT_KEY_PATTERN = /^[A-Z][A-Z0-9_]+$/;
+const ISSUE_KEY_PATTERN = /^[A-Z][A-Z0-9_]+-\d+$/;
 dayjs.extend(customParseFormat);
 
 const OVERALL_LABEL = {
@@ -23,6 +24,7 @@ type ConcernKind = "jira-link" | "heuristic" | "overdue" | "due-today" | "stale"
 
 export const jiraDailyBriefingSchema = z.object({
   projectKey: z.string().trim().regex(PROJECT_KEY_PATTERN, "projectKey must be a Jira project key, e.g. PROJ"),
+  epic: z.array(z.string().trim().regex(ISSUE_KEY_PATTERN, "epic must contain Jira issue keys, e.g. PROJ-123")).min(1).max(50).optional(),
   date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine((value) => dayjs(value, "YYYY-MM-DD", true).isValid(), "date must be yyyy-MM-dd").default(todayLocalDate()),
   maxConcerns: z.number().int().min(1).max(20).default(5),
   audience: z.string().trim().min(1).default("project manager"),
@@ -38,20 +40,45 @@ type Concern = {
   dependency?: string;
 };
 type WeightedProgress = { label: string; line: string };
+type EpicDisplay = { key: string; name: string; url: string };
 
 export async function handleJiraDailyBriefing(rawInput: unknown, cfg: Config): Promise<ToolResult> {
   const parsed = jiraDailyBriefingSchema.safeParse(rawInput);
   if (!parsed.success) return { content: [{ type: "text", text: `Invalid input: ${parsed.error.errors.map((e) => e.message).join("; ")}` }], isError: true };
   const input = parsed.data;
   try {
-    const data = await collectJiraDaily({ projectKey: input.projectKey, date: input.date, maxBlockers: input.maxConcerns }, cfg);
+    const data = await collectJiraDaily({ projectKey: input.projectKey, epic: input.epic, date: input.date, maxBlockers: input.maxConcerns }, cfg);
     const concerns = rankConcerns(data, input.date).slice(0, input.maxConcerns);
     const evidence = await fetchEvidence(concerns, cfg);
-    return { content: [{ type: "text", text: renderBriefing(input, data, concerns, evidence) }] };
+    const epics = await fetchEpics(input.epic, cfg);
+    return { content: [{ type: "text", text: renderBriefing(input, data, concerns, evidence, epics) }] };
   } catch (error: unknown) {
     const message = isMcpError(error) ? `[${error.code}] ${error.message}` : error instanceof Error ? error.message : "Unable to produce a reliable Jira briefing";
     return { content: [{ type: "text", text: `Không thể tạo briefing đáng tin cậy từ Jira: ${message}` }], isError: true };
   }
+}
+
+async function fetchEpics(epicKeys: string[] | undefined, cfg: Config): Promise<{ items: EpicDisplay[]; failures: number }> {
+  if (!epicKeys?.length) return { items: [], failures: 0 };
+  const fallback = (key: string): EpicDisplay => ({ key, name: key, url: `${cfg.JIRA_BASE_URL.replace(/\/$/, "")}/browse/${key}` });
+  let client: JiraHttpClient;
+  try {
+    const cookies = await loadAndValidateSession(cfg.JIRA_SESSION_FILE, cfg.JIRA_BASE_URL, cfg.JIRA_VALIDATE_PATH);
+    client = new JiraHttpClient(cfg.JIRA_BASE_URL, cookies);
+  } catch {
+    return { items: epicKeys.map(fallback), failures: epicKeys.length };
+  }
+  const results = await Promise.allSettled(epicKeys.map((key) => client.getIssue(key)));
+  const items: EpicDisplay[] = [];
+  results.forEach((result, index) => {
+    if (result.status !== "fulfilled") {
+      items.push(fallback(epicKeys[index]));
+      return;
+    }
+    const epic = result.value;
+    items.push({ key: epic.key, name: epic.epicName?.trim() || epic.summary || epic.key, url: epic.url });
+  });
+  return { items, failures: results.filter((result) => result.status === "rejected").length };
 }
 
 async function fetchEvidence(concerns: Concern[], cfg: Config): Promise<Map<string, JiraIssue>> {
@@ -62,48 +89,50 @@ async function fetchEvidence(concerns: Concern[], cfg: Config): Promise<Map<stri
   return new Map(results);
 }
 
-function renderBriefing(input: JiraDailyBriefingInput, data: JiraDailyCollection, concerns: Concern[], evidence: Map<string, JiraIssue>): string {
+function renderBriefing(input: JiraDailyBriefingInput, data: JiraDailyCollection, concerns: Concern[], evidence: Map<string, JiraIssue>, epics: { items: EpicDisplay[]; failures: number }): string {
   const overall: OverallStatus = concerns.some((item) => item.severity === "High") ? "Red" : concerns.length ? "Amber" : "Green";
   const done = data.details.filter(isDone).length;
   const inProgress = data.details.filter((item) => /progress/i.test(item.status) && !isDone(item)).length;
   const weighted = weightedProgress(data.details);
   const lines = [
-    `**Daily brief dự án ${input.projectKey} — ${formatDisplayDate(input.date)}**`,
+    `## Daily brief ${input.projectKey} · ${formatDisplayDate(input.date)}`,
     "",
-    `**Tổng quan: ${OVERALL_LABEL[overall]}**`,
+    `**Tổng quan:** ${OVERALL_LABEL[overall]}`,
+    ...(epics.items.length ? ["", "**Epic:**", ...epics.items.map((epic) => `[${escapeMarkdownLabel(epic.key)}:${escapeMarkdownLabel(epic.name)}](${epic.url})`)] : []),
     "",
-    `- ${data.active.total} issue đang active`,
-    `- ${inProgress} issue đang In Progress`,
-    `- ${done} issue đã hoàn thành`,
-    `- ${data.dueToday.total} issue đến hạn hôm nay`,
-    `- ${data.overdue.total} issue quá hạn`,
-    `- Weighted progress: ${weighted.line}`,
+    "| KPI | Giá trị |",
+    "|---|---:|",
+    `| Active | ${data.active.total} |`,
+    `| In Progress | ${inProgress} |`,
+    `| Hoàn thành | ${done} |`,
+    `| Đến hạn hôm nay | ${data.dueToday.total} |`,
+    `| Quá hạn | ${data.overdue.total} |`,
+    `| Bug trong tuần | ${data.bugsThisWeek.total} |`,
+    `| Weighted progress | ${escapeTableCell(weighted.line)} |`,
     "",
-    "**Các điểm cần quản lý chú ý**",
+    "### Cần chú ý",
     "",
+    "| Issue | Tín hiệu | Trạng thái | Owner |",
+    "|---|---|---|---|",
   ];
   if (!concerns.length) {
-    lines.push("- Không có tín hiệu rủi ro từ dữ liệu Jira hiện tại.");
+    lines.push("| _Không có tín hiệu rủi ro từ dữ liệu Jira hiện tại._ | | | |");
   } else {
     for (const concern of concerns) {
       lines.push(formatConcernLine(concern, evidence.get(concern.issue.key)));
     }
   }
-  lines.push("", "**Việc cần chốt hôm nay**", "");
+  lines.push("", "### Chốt hôm nay", "");
   const actions = actionItems(data, concerns, weighted);
-  if (!actions.length) {
-    lines.push("- Không có việc cần chốt từ dữ liệu Jira hiện tại.");
-  } else {
+  if (actions.length) {
     actions.forEach((item, index) => lines.push(`${index + 1}. ${item}`));
   }
   if (data.linkFailures) {
-    lines.push("", `${data.linkFailures} lần tra cứu phụ thuộc thất bại; tổng số Jira vẫn được giữ nguyên.`);
+    lines.push("", `Tra cứu dependency lỗi: ${data.linkFailures}; số liệu gốc vẫn giữ nguyên.`);
   }
-  lines.push(
-    "",
-    "Báo cáo chỉ đọc, không có thay đổi nào được ghi vào Jira.",
-    navigationHint("`jira_get_issue({issueKey: \"<key>\"})` for details", "`jira_get_issue_links({issueKey: \"<key>\"})` for dependencies"),
-  );
+  if (epics.failures) {
+    lines.push("", `Tra cứu epic lỗi: ${epics.failures}; số liệu gốc vẫn giữ nguyên.`);
+  }
   return lines.join("\n");
 }
 
@@ -144,29 +173,26 @@ function rankConcerns(data: JiraDailyCollection, date: string): Concern[] {
 function formatConcernLine(concern: Concern, detail: JiraIssue | undefined): string {
   const status = detail?.status ?? concern.issue.status;
   const owner = detail?.assignee ?? concern.issue.assignee;
-  const ownerText = owner?.trim() ? `owner ${owner}` : "chưa có owner";
-  const parts = [`trạng thái ${status}`];
-  const signal = concernSignal(concern);
-  if (signal) parts.push(signal);
-  return `- ${issueMarkdownLink(concern.issue)} — ${concern.issue.summary}: ${parts.join(", ")}; ${ownerText}.`;
+  const ownerText = owner?.trim() ? owner : "chưa có owner";
+  return `| ${issueMarkdownLink(concern.issue)} — ${escapeTableCell(concern.issue.summary)} | ${escapeTableCell(concernSignal(concern))} | ${escapeTableCell(status)} | ${escapeTableCell(ownerText)} |`;
 }
 
-function concernSignal(concern: Concern): string | null {
+function concernSignal(concern: Concern): string {
   switch (concern.kind) {
     case "jira-link":
-      return `phụ thuộc Jira: ${concern.dependency ?? "đã xác nhận"}`;
+      return `dependency Jira đã xác nhận: ${concern.dependency ?? "đã xác nhận"}`;
     case "heuristic":
-      return "phát hiện tín hiệu blocker; không có liên kết phụ thuộc đã xác nhận";
+      return "blocker heuristic";
     case "overdue":
       return concern.issue.dueDate ? `quá hạn từ ${formatShortDate(concern.issue.dueDate)}` : "quá hạn";
     case "due-today":
       return "đến hạn hôm nay";
     case "stale":
-      return `không cập nhật từ ${formatShortDate(concern.issue.updated)}`;
+      return `stale: không cập nhật từ ${formatShortDate(concern.issue.updated)}`;
     case "missing-owner":
-      return null;
+      return "thiếu owner";
     case "missing-progress":
-      return "thiếu dữ liệu progress";
+      return "thiếu progress";
   }
 }
 
@@ -207,9 +233,17 @@ function weightedProgress(issues: JiraIssueSummary[]): WeightedProgress {
   if (!weight) return { label: "N/A", line: "N/A" };
   const label = `${(weighted / weight).toFixed(1).replace(".", ",")}%`;
   if (label === "0,0%") {
-    return { label, line: `**${label}** theo dữ liệu Jira, nên cần kiểm tra lại cách tính hoặc dữ liệu estimate` };
+    return { label, line: `${label} (kiểm tra estimate/dữ liệu)` };
   }
-  return { label, line: `**${label}**` };
+  return { label, line: label };
+}
+
+function escapeTableCell(value: string): string {
+  return value.replace(/\|/g, "\\|").replace(/\r?\n|\r/g, "<br>");
+}
+
+function escapeMarkdownLabel(value: string): string {
+  return value.replace(/\\/g, "\\\\").replace(/[\[\]]/g, "\\$&").replace(/\r?\n|\r/g, " ");
 }
 
 function issueMarkdownLink(issue: { key: string; url: string }): string {
